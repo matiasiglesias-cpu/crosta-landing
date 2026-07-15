@@ -21,13 +21,14 @@ import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
  */
 
 // Palette sampled from the reference photos, warmed toward the brand gold
-// (THREE converts sRGB → linear).
-const COL_BASE = new THREE.Color("#e3c884");
-const COL_WARM = new THREE.Color("#cf9d4e");
-const COL_TOAST = new THREE.Color("#ab762f");
+// and kept a step below white so the crisp reads as baked cheese, never
+// glowing plastic (THREE converts sRGB → linear).
+const COL_BASE = new THREE.Color("#d0a95c");
+const COL_WARM = new THREE.Color("#bd8a38");
+const COL_TOAST = new THREE.Color("#9e6a28");
 const COL_FRECKLE_A = new THREE.Color("#a06424");
 const COL_FRECKLE_B = new THREE.Color("#824f18");
-const COL_BLOOM = new THREE.Color("#f3ead0");
+const COL_BLOOM = new THREE.Color("#eadcb4");
 
 // Deterministic RNG so the scene is identical on every visit.
 function mulberry32(seed: number) {
@@ -112,21 +113,32 @@ function addVertexColors(geo: THREE.BufferGeometry) {
       if (w > 0) col.lerp(COL_TOAST, w * p.str);
     }
 
-    // Fine mottling so no region reads as flat color.
+    // Fine mottling so no region reads as flat color — a touch stronger so
+    // the surface reads baked, not molded.
     const mott = 0.5 + 0.5 * fbm(v.x * 2.6 + 9.1, v.y * 2.6 - 4.2, v.z * 2.6 + 1.7);
-    col.lerp(COL_TOAST, mott * 0.22);
-    col.lerp(COL_BLOOM, (1 - mott) * 0.12);
+    col.lerp(COL_TOAST, mott * 0.28);
+    col.lerp(COL_BLOOM, (1 - mott) * 0.1);
 
     for (const f of freckles) {
       const w = smooth(Math.cos(f.size), Math.cos(f.size * 0.35), dir.dot(f.d));
       if (w > 0) col.lerp(f.col, w * f.str);
     }
 
+    // Toasted stretches along some edges — noise-gated so only parts of the
+    // perimeter brown in the oven, warm but well short of burnt.
+    const edge = smooth(0.62, 1.0, rp);
+    const toastGate = smooth(
+      0.08,
+      0.6,
+      fbm(dir.x * 2.1 + 13.7, dir.y * 2.1 - 6.4, dir.z * 2.1 + 8.5)
+    );
+    col.lerp(COL_TOAST, edge * toastGate * 0.62);
+
     // Floury frost along the rim seam, patchy like the photos.
     const rimBand = smooth(0.34, 0.1, nz) * smooth(0.55, 0.95, rp);
     const frost =
       rimBand * (0.45 + 0.55 * (0.5 + 0.5 * fbm(v.x * 3.1 - 2, v.y * 3.1 + 5, v.z * 3.1)));
-    col.lerp(COL_BLOOM, frost * 0.55);
+    col.lerp(COL_BLOOM, frost * 0.42);
 
     colors[i * 3] = col.r;
     colors[i * 3 + 1] = col.g;
@@ -192,8 +204,8 @@ function createChipGeometry(): THREE.BufferGeometry {
     // Organic undulation + fine baked-surface irregularity (kept gentle so
     // the sides don't cave inward).
     const d =
-      0.035 * fbm(x * 1.7 + 3.1, y * 1.7 - 1.2, z * 1.7) +
-      0.013 * fbm(x * 5.4, y * 5.4 + 7.7, z * 5.4 - 2.4);
+      0.042 * fbm(x * 1.7 + 3.1, y * 1.7 - 1.2, z * 1.7) +
+      0.018 * fbm(x * 6.1, y * 6.1 + 7.7, z * 6.1 - 2.4);
     x += sx * d;
     y += sy * d;
     z += sz * d * 0.7;
@@ -426,11 +438,11 @@ function Galaxy({ geometry }: { geometry: THREE.BufferGeometry }) {
       <instancedMesh ref={inst} args={[geometry, undefined, MINIS]} frustumCulled={false}>
         <meshPhysicalMaterial
           vertexColors
-          roughness={0.68}
+          roughness={0.72}
           sheen={0.35}
           sheenRoughness={0.9}
           sheenColor="#ffe9bf"
-          envMapIntensity={0.3}
+          envMapIntensity={0.24}
         />
       </instancedMesh>
 
@@ -502,13 +514,13 @@ function ChipScene({ pointer, spin, hovered }: ChipSceneProps) {
           <mesh geometry={geometry} rotation={[0.1, 0, Math.PI / 4 + 0.05]} scale={0.75}>
             <meshPhysicalMaterial
               vertexColors
-              roughness={0.62}
-              sheen={0.3}
+              roughness={0.72}
+              sheen={0.26}
               sheenRoughness={0.85}
               sheenColor="#ffe9bf"
-              clearcoat={0.06}
+              clearcoat={0.02}
               clearcoatRoughness={0.7}
-              envMapIntensity={0.22}
+              envMapIntensity={0.12}
             />
           </mesh>
         </group>
@@ -521,6 +533,20 @@ function ChipScene({ pointer, spin, hovered }: ChipSceneProps) {
 
 /* ------------------------- floating highlights ------------------------- */
 
+// Each connector filament is a hand-tuned bezier in the 0–100 viewBox of the
+// square hero container: it rises just outside the galaxy band (`from`),
+// waves once or twice, and dies out just short of its label (`to`) — no two
+// curves alike. `dur`/`begin` drive the traveling spark, `delay` staggers the
+// shimmer so the six lines never breathe in unison.
+interface Connector {
+  d: string;
+  from: [number, number];
+  to: [number, number];
+  dur: number;
+  begin: number;
+  delay: number;
+}
+
 const HIGHLIGHTS: {
   text: string;
   style: CSSProperties;
@@ -528,14 +554,111 @@ const HIGHLIGHTS: {
   duration: number;
   delay: number;
   mobile: boolean;
+  conn: Connector;
 }[] = [
-  { text: "Rich in BCAAs", style: { top: "9%", left: "6%" }, depth: 10, duration: 6.5, delay: 0, mobile: true },
-  { text: "High in Leucine", style: { top: "16%", right: "4%" }, depth: 14, duration: 7.5, delay: 1.2, mobile: false },
-  { text: "Essential Amino Acids", style: { top: "52%", left: "-2%" }, depth: 7, duration: 8, delay: 0.6, mobile: false },
-  { text: "Vitamin B12", style: { top: "46%", right: "-1%" }, depth: 12, duration: 6, delay: 1.8, mobile: true },
-  { text: "Calcium", style: { bottom: "12%", left: "10%" }, depth: 13, duration: 7, delay: 0.9, mobile: true },
-  { text: "Phosphorus", style: { bottom: "7%", right: "12%" }, depth: 8, duration: 8.5, delay: 2.1, mobile: false },
+  {
+    text: "Rich in BCAAs",
+    style: { top: "5%", left: "1%" },
+    depth: 10, duration: 6.5, delay: 0, mobile: true,
+    conn: { d: "M 22 32 C 15 27, 19 21, 14.5 16 S 12 13, 14 10.5", from: [22, 32], to: [14, 10.5], dur: 7.5, begin: -1, delay: 0 },
+  },
+  {
+    text: "High in Leucine",
+    style: { top: "12%", right: "-4%" },
+    depth: 14, duration: 7.5, delay: 1.2, mobile: false,
+    conn: { d: "M 72 31 C 80 27, 68 24, 75 19.5", from: [72, 31], to: [75, 19.5], dur: 9, begin: -4, delay: 1.5 },
+  },
+  {
+    text: "Essential Amino Acids",
+    style: { top: "60%", left: "-16%" },
+    depth: 7, duration: 8, delay: 0.6, mobile: false,
+    conn: { d: "M 30 69 C 21 72.5, 18 70, 12 67.2", from: [30, 69], to: [12, 67.2], dur: 8, begin: -2.5, delay: 3 },
+  },
+  {
+    text: "Vitamin B12",
+    style: { top: "44%", right: "-8%" },
+    depth: 12, duration: 6, delay: 1.8, mobile: true,
+    conn: { d: "M 82 62 C 90 58, 81 54, 86.5 51.5", from: [82, 62], to: [86.5, 51.5], dur: 7, begin: -6, delay: 4.5 },
+  },
+  {
+    text: "Calcium",
+    style: { bottom: "8%", left: "3%" },
+    depth: 13, duration: 7, delay: 0.9, mobile: true,
+    conn: { d: "M 34 74 C 24 76.5, 26 82, 15 85.8", from: [34, 74], to: [15, 85.8], dur: 9.5, begin: -3, delay: 6 },
+  },
+  {
+    text: "Phosphorus",
+    style: { bottom: "3%", right: "7%" },
+    depth: 8, duration: 8.5, delay: 2.1, mobile: false,
+    conn: { d: "M 64 78 C 73 80.5, 66 86, 76 90.3", from: [64, 78], to: [76, 90.3], dur: 8.5, begin: -5, delay: 7.5 },
+  },
 ];
+
+// Gold filaments drawn from just outside the orbit to each label — thin,
+// asymmetric, shimmering slowly, with the occasional spark drifting along
+// them. They parallax at a shallow depth so they sit between the galaxy and
+// the labels; the per-path gradient fades them in from the orbit so they
+// look pulled outward rather than pinned on.
+function ConnectorLines({ sx, sy }: { sx: MotionValue<number>; sy: MotionValue<number> }) {
+  const x = useTransform(sx, (v) => v * 5);
+  const y = useTransform(sy, (v) => v * 5);
+
+  return (
+    <motion.div style={{ x, y }} className="pointer-events-none absolute inset-0 z-[15]">
+      <svg viewBox="0 0 100 100" className="h-full w-full overflow-visible" aria-hidden="true">
+        <defs>
+          {HIGHLIGHTS.map((h, i) => (
+            <linearGradient
+              key={h.text}
+              id={`conn-grad-${i}`}
+              gradientUnits="userSpaceOnUse"
+              x1={h.conn.from[0]}
+              y1={h.conn.from[1]}
+              x2={h.conn.to[0]}
+              y2={h.conn.to[1]}
+            >
+              <stop offset="0" stopColor="#d6b15a" stopOpacity="0" />
+              <stop offset="0.22" stopColor="#d6b15a" stopOpacity="0.8" />
+              <stop offset="0.85" stopColor="#dfc07a" stopOpacity="1" />
+              <stop offset="1" stopColor="#e8cd8a" stopOpacity="0.5" />
+            </linearGradient>
+          ))}
+        </defs>
+        {HIGHLIGHTS.map((h, i) => (
+          <g key={h.text} className={h.mobile ? undefined : "hidden sm:block"}>
+            <path
+              id={`conn-path-${i}`}
+              d={h.conn.d}
+              fill="none"
+              stroke={`url(#conn-grad-${i})`}
+              strokeWidth={1.3}
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+              className="conn-line"
+              style={{
+                animationDelay: `${h.conn.delay}s`,
+                filter: "drop-shadow(0 0 3px rgba(214, 177, 90, 0.45))",
+              }}
+            />
+            <circle className="conn-dot" r={0.5} fill="#eed9a4" opacity={0}>
+              <animateMotion dur={`${h.conn.dur}s`} begin={`${h.conn.begin}s`} repeatCount="indefinite">
+                <mpath href={`#conn-path-${i}`} xlinkHref={`#conn-path-${i}`} />
+              </animateMotion>
+              <animate
+                attributeName="opacity"
+                values="0;0.9;0.9;0"
+                keyTimes="0;0.2;0.65;1"
+                dur={`${h.conn.dur}s`}
+                begin={`${h.conn.begin}s`}
+                repeatCount="indefinite"
+              />
+            </circle>
+          </g>
+        ))}
+      </svg>
+    </motion.div>
+  );
+}
 
 function FloatLabel({
   style,
@@ -569,9 +692,10 @@ function FloatLabel({
       <motion.span
         animate={{ y: [0, -5, 0] }}
         transition={{ duration, repeat: Infinity, ease: "easeInOut", delay }}
-        className="flex items-center gap-1.5 whitespace-nowrap text-[10px] font-medium uppercase tracking-[0.18em] text-foreground/40"
+        className="flex items-center gap-2 whitespace-nowrap text-[12px] font-medium uppercase tracking-[0.19em] text-foreground/45"
+        style={{ textShadow: "0 0 16px rgba(216, 181, 91, 0.3)" }}
       >
-        <span className="h-1 w-1 shrink-0 rounded-full bg-gold/50" />
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-gold/50" />
         {children}
       </motion.span>
     </motion.div>
@@ -614,12 +738,12 @@ export default function ChipVisual() {
       onPointerEnter={() => (hovered.current = true)}
       onPointerLeave={() => (hovered.current = false)}
       role="img"
-      aria-label="A golden CROSTA Parmesan crisp floating in front of a slowly rotating galaxy of gold dust and miniature crisps, tilting toward your cursor"
+      aria-label="A baked-gold CROSTA Parmesan crisp floating in front of a slowly rotating galaxy of gold dust and miniature crisps, with fine golden filaments flowing out to its nutrient labels, tilting toward your cursor"
       className="relative mx-auto h-[320px] w-[320px] cursor-pointer sm:h-[430px] sm:w-[430px]"
     >
-      {/* Soft ambient glow behind the crisp — kept faint so the chip's own
-          lighting stays natural. */}
-      <div className="absolute inset-12 rounded-full bg-gold/[0.07] blur-3xl" />
+      {/* Soft ambient glow behind the crisp — dialed well down so the crisp
+          never reads as backlit plastic. */}
+      <div className="absolute inset-14 rounded-full bg-gold/[0.045] blur-3xl" />
 
       {/* Grounding shadow — anchors it like a product shot. */}
       <div className="absolute bottom-[4%] left-1/2 h-8 w-2/5 -translate-x-1/2 rounded-[50%] bg-black/55 blur-xl" />
@@ -631,12 +755,15 @@ export default function ChipVisual() {
         gl={{ antialias: true, alpha: true }}
       >
         <Env />
-        <ambientLight intensity={0.12} color="#fff4e0" />
-        <directionalLight position={[4, 5, 1.5]} intensity={0.85} color="#ffe9c0" />
-        <directionalLight position={[-3.5, -2, 2.5]} intensity={0.4} color="#d8b55b" />
-        <directionalLight position={[0, 2, -4]} intensity={0.7} color="#e8cd8a" />
+        <ambientLight intensity={0.08} color="#fff4e0" />
+        <directionalLight position={[4, 5, 1.5]} intensity={0.46} color="#ffe2ae" />
+        <directionalLight position={[-3.5, -2, 2.5]} intensity={0.28} color="#d8b55b" />
+        <directionalLight position={[0, 2, -4]} intensity={0.4} color="#e8cd8a" />
         <ChipScene pointer={pointer} spin={spin} hovered={hovered} />
       </Canvas>
+
+      {/* Filaments flowing from the orbit out to each nutrient label. */}
+      <ConnectorLines sx={sx} sy={sy} />
 
       {/* Floating nutrient highlights — quiet, parallaxed, never competing
           with the chip. */}

@@ -48,6 +48,13 @@
     background-size: 200% 100%;
   }
 
+  /* Hero connector filaments — a slow breathing shimmer between 17% and 34%
+     opacity. Deliberately faint: noticed on the second look, never the first. */
+  .conn-line {
+    opacity: 0.26;
+    animation: conn-shimmer 9s ease-in-out infinite;
+  }
+
   /* Fixed film grain over the whole page — a barely-there texture that
      keeps the large dark areas from reading as flat digital black. */
   .grain {
@@ -58,5 +65,24 @@
     opacity: 0.04;
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
     background-size: 160px 160px;
+  }
+}
+
+@keyframes conn-shimmer {
+  0%,
+  100% {
+    opacity: 0.17;
+  }
+  50% {
+    opacity: 0.34;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conn-line {
+    animation: none;
+  }
+  .conn-dot {
+    display: none;
   }
 }
