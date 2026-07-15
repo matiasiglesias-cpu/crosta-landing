@@ -1,9 +1,18 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Sparkles } from "lucide-react";
+import { Gift, Sparkles } from "lucide-react";
+import dynamic from "next/dynamic";
 import GoldButton from "./GoldButton";
-import CrispVisual from "./CrispVisual";
+
+// The 3D chip is client-only (WebGL); reserve its box while it loads so the
+// hero doesn't shift.
+const ChipVisual = dynamic(() => import("./ChipVisual"), {
+  ssr: false,
+  loading: () => (
+    <div className="mx-auto h-[320px] w-[320px] sm:h-[430px] sm:w-[430px]" />
+  ),
+});
 
 const container = {
   hidden: {},
@@ -70,16 +79,19 @@ export default function Hero() {
             Coming Soon
           </GoldButton>
         </motion.div>
+
+        <motion.p
+          variants={item}
+          className="mt-6 inline-flex items-center gap-2 text-sm text-gold-light/90"
+        >
+          <Gift className="h-4 w-4" strokeWidth={1.75} />
+          Waitlist members get 2-for-1 on their first order.
+        </motion.p>
       </motion.div>
 
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 1, delay: 0.4 }}
-        className="relative z-10 mt-16"
-      >
-        <CrispVisual />
-      </motion.div>
+      <div className="relative z-10 mt-10">
+        <ChipVisual />
+      </div>
     </section>
   );
 }
