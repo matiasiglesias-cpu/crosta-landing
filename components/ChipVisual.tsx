@@ -2,7 +2,7 @@
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { motion, useMotionValue, useSpring, useTransform, MotionValue } from "framer-motion";
-import { CSSProperties, MutableRefObject, ReactNode, useEffect, useMemo, useRef } from "react";
+import { MutableRefObject, ReactNode, useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
@@ -13,10 +13,12 @@ import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
  * golden surface warming to toast at the center, sparse browned freckles,
  * and a floury, frosted bloom along the rim seam.
  *
- * Behind it, a quiet Milky-Way-style galaxy: a tilted disc of gold dust
+ * Around it, a quiet Milky-Way-style galaxy: a tilted disc of gold dust
  * with faint spiral arms that thins out into space, plus a handful of
  * miniature crisps — some square, some rectangular like the 100 g batch
- * packs — drifting along the disc. The galaxy rotates on its own and
+ * packs — drifting along the disc. The disc straddles the crisp's depth,
+ * so its upper sweep slips behind the product while a dim veil of the
+ * lower sweep passes in front. The galaxy rotates on its own and
  * ignores the cursor; only the hero chip responds to it.
  */
 
@@ -311,6 +313,39 @@ function makeStars(count: number, seed: number) {
   return { positions, colors };
 }
 
+// Dust material with a depth-aware fade injected into the stock points
+// shader: strands swinging toward the viewer dim to a thin veil, so the
+// stretch of orbit that passes in front of the crisp reads as atmosphere
+// and never competes with the product. Dust at or behind the chip's
+// depth keeps full brightness; by z ≈ +0.35 (its forward extreme) it
+// fades to half — still perceptible against the crisp, never a screen.
+function makeDustMaterial(size: number, opacity: number) {
+  const mat = new THREE.PointsMaterial({
+    vertexColors: true,
+    size,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying float vWorldZ;")
+      .replace(
+        "#include <project_vertex>",
+        "vWorldZ = ( modelMatrix * vec4( transformed, 1.0 ) ).z;\n\t#include <project_vertex>"
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying float vWorldZ;")
+      .replace(
+        "#include <color_fragment>",
+        "#include <color_fragment>\n\tdiffuseColor.rgb *= mix( 1.0, 0.5, smoothstep( 0.05, 0.35, vWorldZ ) );"
+      );
+  };
+  return mat;
+}
+
 interface Mini {
   phi: number;
   radius: number;
@@ -323,11 +358,15 @@ interface Mini {
   speed: number;
 }
 
-// The whole galaxy lives on a transversal plane behind the hero chip:
-// pushed back in z, tilted like a spiral galaxy seen at a slight angle,
-// squashed into an ellipse. It spins on its own and never follows the
-// cursor. Everything here stays behind the chip, so nothing ever crosses
-// in front of the product.
+// The whole galaxy lives on a transversal plane that straddles the hero
+// chip's depth (z=-0.1, scaled 0.855 so its apparent size matches the old
+// z=-1 placement): tilted like a spiral galaxy seen at a slight angle,
+// squashed into an ellipse. Because the disc now crosses the chip, the
+// depth buffer hides the upper sweep behind the product while the lower
+// sweep drifts in front as a dim veil (see makeDustMaterial) — the crisp
+// sits INSIDE the galaxy like a planet in its rings. Minis and stars are
+// nested in groups pushed further back so only dust ever crosses in
+// front. It spins on its own and never follows the cursor.
 function Galaxy({ geometry }: { geometry: THREE.BufferGeometry }) {
   const dustSpin = useRef<THREE.Group>(null);
   const inst = useRef<THREE.InstancedMesh>(null);
@@ -335,6 +374,18 @@ function Galaxy({ geometry }: { geometry: THREE.BufferGeometry }) {
   const fine = useMemo(() => makeDust(DUST_FINE, 41), []);
   const coarse = useMemo(() => makeDust(DUST_COARSE, 87), []);
   const stars = useMemo(() => makeStars(STARS, 133), []);
+
+  // Point sizes are pre-multiplied by the group scale (gl_PointSize ignores
+  // object scale), so the dust grain matches the old z=-1 look exactly.
+  const fineMat = useMemo(() => makeDustMaterial(0.029, 0.7), []);
+  const coarseMat = useMemo(() => makeDustMaterial(0.05, 0.55), []);
+  useEffect(
+    () => () => {
+      fineMat.dispose();
+      coarseMat.dispose();
+    },
+    [fineMat, coarseMat]
+  );
 
   const minis = useMemo<Mini[]>(() => {
     const rand = mulberry32(99);
@@ -397,7 +448,7 @@ function Galaxy({ geometry }: { geometry: THREE.BufferGeometry }) {
   });
 
   return (
-    <group position={[0, 0, -1]} rotation={[-0.35, 0, -0.1]}>
+    <group position={[0, 0, -0.1]} rotation={[-0.35, 0, -0.1]} scale={0.855}>
       {/* Squash → spin → circular disc = an ellipse with fixed axes that
           rotates in place instead of tumbling. */}
       <group scale={[1, 0.5, 1]}>
@@ -407,60 +458,52 @@ function Galaxy({ geometry }: { geometry: THREE.BufferGeometry }) {
               <bufferAttribute attach="attributes-position" args={[fine.positions, 3]} />
               <bufferAttribute attach="attributes-color" args={[fine.colors, 3]} />
             </bufferGeometry>
-            <pointsMaterial
-              vertexColors
-              size={0.034}
-              sizeAttenuation
-              transparent
-              opacity={0.7}
-              blending={THREE.AdditiveBlending}
-              depthWrite={false}
-            />
+            <primitive object={fineMat} attach="material" />
           </points>
           <points frustumCulled={false}>
             <bufferGeometry>
               <bufferAttribute attach="attributes-position" args={[coarse.positions, 3]} />
               <bufferAttribute attach="attributes-color" args={[coarse.colors, 3]} />
             </bufferGeometry>
-            <pointsMaterial
-              vertexColors
-              size={0.058}
-              sizeAttenuation
-              transparent
-              opacity={0.55}
-              blending={THREE.AdditiveBlending}
-              depthWrite={false}
-            />
+            <primitive object={coarseMat} attach="material" />
           </points>
         </group>
       </group>
 
-      <instancedMesh ref={inst} args={[geometry, undefined, MINIS]} frustumCulled={false}>
-        <meshPhysicalMaterial
-          vertexColors
-          roughness={0.72}
-          sheen={0.35}
-          sheenRoughness={0.9}
-          sheenColor="#ffe9bf"
-          envMapIntensity={0.24}
-        />
-      </instancedMesh>
+      {/* Minis ride slightly behind the disc plane: their tilt-forward
+          excursion tops out just behind the chip's front surface, so an
+          opaque mini never slides across the hero product. */}
+      <group position={[0, 0, -0.5]}>
+        <instancedMesh ref={inst} args={[geometry, undefined, MINIS]} frustumCulled={false}>
+          <meshPhysicalMaterial
+            vertexColors
+            roughness={0.72}
+            sheen={0.35}
+            sheenRoughness={0.9}
+            sheenColor="#ffe9bf"
+            envMapIntensity={0.24}
+          />
+        </instancedMesh>
+      </group>
 
-      <points frustumCulled={false}>
-        <bufferGeometry>
-          <bufferAttribute attach="attributes-position" args={[stars.positions, 3]} />
-          <bufferAttribute attach="attributes-color" args={[stars.colors, 3]} />
-        </bufferGeometry>
-        <pointsMaterial
-          vertexColors
-          size={0.028}
-          sizeAttenuation
-          transparent
-          opacity={0.5}
-          blending={THREE.AdditiveBlending}
-          depthWrite={false}
-        />
-      </points>
+      {/* Stars stay a distant backdrop, ~where the whole galaxy used to sit. */}
+      <group position={[0, 0, -1]}>
+        <points frustumCulled={false}>
+          <bufferGeometry>
+            <bufferAttribute attach="attributes-position" args={[stars.positions, 3]} />
+            <bufferAttribute attach="attributes-color" args={[stars.colors, 3]} />
+          </bufferGeometry>
+          <pointsMaterial
+            vertexColors
+            size={0.028}
+            sizeAttenuation
+            transparent
+            opacity={0.5}
+            blending={THREE.AdditiveBlending}
+            depthWrite={false}
+          />
+        </points>
+      </group>
     </group>
   );
 }
@@ -538,6 +581,12 @@ function ChipScene({ pointer, spin, hovered }: ChipSceneProps) {
 // waves once or twice, and dies out just short of its label (`to`) — no two
 // curves alike. `dur`/`begin` drive the traveling spark, `delay` staggers the
 // shimmer so the six lines never breathe in unison.
+//
+// From sm: up the labels float well beyond the galaxy's outer edge (chip =
+// planet, aura = atmosphere, labels = satellites past it), so the desktop
+// paths run long to bridge the gap. On phones there is no room for that —
+// the three mobile lines keep their original short runs in `mob`, matching
+// the labels' compact mobile positions in `pos`.
 interface Connector {
   d: string;
   from: [number, number];
@@ -545,11 +594,12 @@ interface Connector {
   dur: number;
   begin: number;
   delay: number;
+  mob?: { d: string; to: [number, number]; dur: number };
 }
 
 const HIGHLIGHTS: {
   text: string;
-  style: CSSProperties;
+  pos: string;
   depth: number;
   duration: number;
   delay: number;
@@ -558,39 +608,51 @@ const HIGHLIGHTS: {
 }[] = [
   {
     text: "Rich in BCAAs",
-    style: { top: "5%", left: "1%" },
+    pos: "top-[5%] left-[1%] sm:top-[1%] sm:left-[-13%]",
     depth: 10, duration: 6.5, delay: 0, mobile: true,
-    conn: { d: "M 22 32 C 15 27, 19 21, 14.5 16 S 12 13, 14 10.5", from: [22, 32], to: [14, 10.5], dur: 7.5, begin: -1, delay: 0 },
+    conn: {
+      d: "M 22 32 C 15 27, 19 21, 14.5 16 S 12 13, 14 10.5 C 9 8.5, 1 10, -7 5.5",
+      from: [22, 32], to: [-7, 5.5], dur: 9, begin: -1, delay: 0,
+      mob: { d: "M 22 32 C 15 27, 19 21, 14.5 16 S 12 13, 14 10.5", to: [14, 10.5], dur: 7.5 },
+    },
   },
   {
     text: "High in Leucine",
-    style: { top: "12%", right: "-4%" },
+    pos: "top-[7%] right-[-16%]",
     depth: 14, duration: 7.5, delay: 1.2, mobile: false,
-    conn: { d: "M 72 31 C 80 27, 68 24, 75 19.5", from: [72, 31], to: [75, 19.5], dur: 9, begin: -4, delay: 1.5 },
+    conn: { d: "M 72 31 C 80 27, 68 24, 75 19.5 S 74 14, 80 11", from: [72, 31], to: [80, 11], dur: 9.5, begin: -4, delay: 1.5 },
   },
   {
     text: "Essential Amino Acids",
-    style: { top: "60%", left: "-16%" },
+    pos: "top-[61%] left-[-26%]",
     depth: 7, duration: 8, delay: 0.6, mobile: false,
-    conn: { d: "M 30 69 C 21 72.5, 18 70, 12 67.2", from: [30, 69], to: [12, 67.2], dur: 8, begin: -2.5, delay: 3 },
+    conn: { d: "M 30 69 C 21 72.5, 18 70, 12 67.2 S 0 69.5, -8 66.5 S -16 67, -20 64.8", from: [30, 69], to: [-20, 64.8], dur: 10, begin: -2.5, delay: 3 },
   },
   {
     text: "Vitamin B12",
-    style: { top: "44%", right: "-8%" },
+    pos: "top-[44%] right-[-8%] sm:top-[43%] sm:right-[-22%]",
     depth: 12, duration: 6, delay: 1.8, mobile: true,
-    conn: { d: "M 82 62 C 90 58, 81 54, 86.5 51.5", from: [82, 62], to: [86.5, 51.5], dur: 7, begin: -6, delay: 4.5 },
+    conn: {
+      d: "M 82 62 C 90 58, 81 54, 86.5 51.5 S 88 47.5, 94 46",
+      from: [82, 62], to: [94, 46], dur: 8, begin: -6, delay: 4.5,
+      mob: { d: "M 82 62 C 90 58, 81 54, 86.5 51.5", to: [86.5, 51.5], dur: 7 },
+    },
   },
   {
     text: "Calcium",
-    style: { bottom: "8%", left: "3%" },
+    pos: "bottom-[8%] left-[3%] sm:bottom-[-3%] sm:left-[-15%]",
     depth: 13, duration: 7, delay: 0.9, mobile: true,
-    conn: { d: "M 34 74 C 24 76.5, 26 82, 15 85.8", from: [34, 74], to: [15, 85.8], dur: 9.5, begin: -3, delay: 6 },
+    conn: {
+      d: "M 34 74 C 24 76.5, 26 82, 15 85.8 S 2 88, -2 93 S -9 97.5, -11 99.5",
+      from: [34, 74], to: [-11, 99.5], dur: 11, begin: -3, delay: 6,
+      mob: { d: "M 34 74 C 24 76.5, 26 82, 15 85.8", to: [15, 85.8], dur: 9.5 },
+    },
   },
   {
     text: "Phosphorus",
-    style: { bottom: "3%", right: "7%" },
+    pos: "bottom-[-5%] right-[-2%]",
     depth: 8, duration: 8.5, delay: 2.1, mobile: false,
-    conn: { d: "M 64 78 C 73 80.5, 66 86, 76 90.3", from: [64, 78], to: [76, 90.3], dur: 8.5, begin: -5, delay: 7.5 },
+    conn: { d: "M 64 78 C 73 80.5, 66 86, 76 90.3 S 69.5 96.5, 76 100.5", from: [64, 78], to: [76, 100.5], dur: 9.5, begin: -5, delay: 7.5 },
   },
 ];
 
@@ -603,19 +665,39 @@ function ConnectorLines({ sx, sy }: { sx: MotionValue<number>; sy: MotionValue<n
   const x = useTransform(sx, (v) => v * 5);
   const y = useTransform(sy, (v) => v * 5);
 
+  // Flatten each highlight into breakpoint-scoped runs: the long desktop
+  // path always renders from sm: up; a mobile-visible highlight adds its
+  // original short run below sm. Gradient endpoints track each run's own
+  // from/to, so every run needs its own gradient.
+  const runs = HIGHLIGHTS.flatMap((h, i) => {
+    const desk = {
+      id: `conn-${i}`,
+      cls: "hidden sm:block",
+      d: h.conn.d,
+      from: h.conn.from,
+      to: h.conn.to,
+      dur: h.conn.dur,
+      begin: h.conn.begin,
+      delay: h.conn.delay,
+    };
+    return h.mobile && h.conn.mob
+      ? [desk, { ...desk, id: `conn-${i}-m`, cls: "sm:hidden", d: h.conn.mob.d, to: h.conn.mob.to, dur: h.conn.mob.dur }]
+      : [desk];
+  });
+
   return (
     <motion.div style={{ x, y }} className="pointer-events-none absolute inset-0 z-[15]">
       <svg viewBox="0 0 100 100" className="h-full w-full overflow-visible" aria-hidden="true">
         <defs>
-          {HIGHLIGHTS.map((h, i) => (
+          {runs.map((r) => (
             <linearGradient
-              key={h.text}
-              id={`conn-grad-${i}`}
+              key={r.id}
+              id={`${r.id}-grad`}
               gradientUnits="userSpaceOnUse"
-              x1={h.conn.from[0]}
-              y1={h.conn.from[1]}
-              x2={h.conn.to[0]}
-              y2={h.conn.to[1]}
+              x1={r.from[0]}
+              y1={r.from[1]}
+              x2={r.to[0]}
+              y2={r.to[1]}
             >
               <stop offset="0" stopColor="#d6b15a" stopOpacity="0" />
               <stop offset="0.22" stopColor="#d6b15a" stopOpacity="0.8" />
@@ -624,32 +706,32 @@ function ConnectorLines({ sx, sy }: { sx: MotionValue<number>; sy: MotionValue<n
             </linearGradient>
           ))}
         </defs>
-        {HIGHLIGHTS.map((h, i) => (
-          <g key={h.text} className={h.mobile ? undefined : "hidden sm:block"}>
+        {runs.map((r) => (
+          <g key={r.id} className={r.cls}>
             <path
-              id={`conn-path-${i}`}
-              d={h.conn.d}
+              id={`${r.id}-path`}
+              d={r.d}
               fill="none"
-              stroke={`url(#conn-grad-${i})`}
+              stroke={`url(#${r.id}-grad)`}
               strokeWidth={1.3}
               strokeLinecap="round"
               vectorEffect="non-scaling-stroke"
               className="conn-line"
               style={{
-                animationDelay: `${h.conn.delay}s`,
+                animationDelay: `${r.delay}s`,
                 filter: "drop-shadow(0 0 3px rgba(214, 177, 90, 0.45))",
               }}
             />
             <circle className="conn-dot" r={0.5} fill="#eed9a4" opacity={0}>
-              <animateMotion dur={`${h.conn.dur}s`} begin={`${h.conn.begin}s`} repeatCount="indefinite">
-                <mpath href={`#conn-path-${i}`} xlinkHref={`#conn-path-${i}`} />
+              <animateMotion dur={`${r.dur}s`} begin={`${r.begin}s`} repeatCount="indefinite">
+                <mpath href={`#${r.id}-path`} xlinkHref={`#${r.id}-path`} />
               </animateMotion>
               <animate
                 attributeName="opacity"
                 values="0;0.9;0.9;0"
                 keyTimes="0;0.2;0.65;1"
-                dur={`${h.conn.dur}s`}
-                begin={`${h.conn.begin}s`}
+                dur={`${r.dur}s`}
+                begin={`${r.begin}s`}
                 repeatCount="indefinite"
               />
             </circle>
@@ -661,7 +743,7 @@ function ConnectorLines({ sx, sy }: { sx: MotionValue<number>; sy: MotionValue<n
 }
 
 function FloatLabel({
-  style,
+  pos,
   depth,
   duration,
   delay,
@@ -670,7 +752,7 @@ function FloatLabel({
   sy,
   children,
 }: {
-  style: CSSProperties;
+  pos: string;
   depth: number;
   duration: number;
   delay: number;
@@ -680,14 +762,15 @@ function FloatLabel({
   children: ReactNode;
 }) {
   // Each label parallaxes at its own depth, drifting gently against the
-  // cursor for a layered, dimensional feel.
+  // cursor for a layered, dimensional feel. Positioning lives in `pos`
+  // (Tailwind classes) so mobile and desktop can anchor differently.
   const x = useTransform(sx, (v) => v * depth);
   const y = useTransform(sy, (v) => v * depth);
 
   return (
     <motion.div
-      style={{ ...style, x, y }}
-      className={`absolute ${mobile ? "flex" : "hidden sm:flex"}`}
+      style={{ x, y }}
+      className={`absolute ${pos} ${mobile ? "flex" : "hidden sm:flex"}`}
     >
       <motion.span
         animate={{ y: [0, -5, 0] }}
@@ -738,7 +821,7 @@ export default function ChipVisual() {
       onPointerEnter={() => (hovered.current = true)}
       onPointerLeave={() => (hovered.current = false)}
       role="img"
-      aria-label="A baked-gold CROSTA Parmesan crisp floating in front of a slowly rotating galaxy of gold dust and miniature crisps, with fine golden filaments flowing out to its nutrient labels, tilting toward your cursor"
+      aria-label="A baked-gold CROSTA Parmesan crisp floating inside a slowly rotating galaxy of gold dust and miniature crisps, with fine golden filaments flowing out past the galaxy to its nutrient labels, tilting toward your cursor"
       className="relative mx-auto h-[320px] w-[320px] cursor-pointer sm:h-[430px] sm:w-[430px]"
     >
       {/* Soft ambient glow behind the crisp — dialed well down so the crisp
@@ -771,7 +854,7 @@ export default function ChipVisual() {
         {HIGHLIGHTS.map((h) => (
           <FloatLabel
             key={h.text}
-            style={h.style}
+            pos={h.pos}
             depth={h.depth}
             duration={h.duration}
             delay={h.delay}
