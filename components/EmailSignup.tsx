@@ -14,23 +14,12 @@ import RevealOnScroll from "./RevealOnScroll";
 
 type Status = "idle" | "loading" | "success" | "error";
 
-// Unambiguous characters only (no 0/O, 1/I/L).
-const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
-
-// Placeholder until the backend issues real per-subscriber codes.
-function generateCode() {
-  let suffix = "";
-  for (let i = 0; i < 4; i++) {
-    suffix += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)];
-  }
-  return `CROSTA-2X1-${suffix}`;
-}
-
 export default function EmailSignup() {
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [code, setCode] = useState("");
   const [copied, setCopied] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -38,10 +27,26 @@ export default function EmailSignup() {
 
     setStatus("loading");
     try {
-      await new Promise((resolve) => setTimeout(resolve, 900));
-      setCode(generateCode());
+      const response = await fetch("/api/waitlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim() }),
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok || !data?.couponCode) {
+        setErrorMessage(
+          data?.error || "Something went wrong. Please try again."
+        );
+        setStatus("error");
+        return;
+      }
+
+      setCode(data.couponCode);
       setStatus("success");
     } catch {
+      setErrorMessage("Network error. Please check your connection and try again.");
       setStatus("error");
     }
   };
@@ -89,13 +94,13 @@ export default function EmailSignup() {
                   <div className="flex items-center justify-center gap-2 text-gold-light">
                     <CheckCircle2 className="h-5 w-5" strokeWidth={1.75} />
                     <span className="text-sm font-medium">
-                      You&apos;re on the list. We&apos;ll be in touch.
+                      🎉 Welcome to the Crosta Chips waitlist!
                     </span>
                   </div>
 
                   <div className="mx-auto mt-6 max-w-sm rounded-3xl border border-dashed border-gold/40 bg-background/50 px-6 py-5">
                     <p className="text-xs font-medium uppercase tracking-[0.18em] text-foreground/50">
-                      Your 2-for-1 code
+                      Your exclusive 2-for-1 launch coupon
                     </p>
                     <div className="mt-3 flex items-center justify-center gap-3">
                       <span className="font-mono text-lg tracking-[0.14em] text-gold-light">
@@ -160,6 +165,12 @@ export default function EmailSignup() {
                 </motion.form>
               )}
             </AnimatePresence>
+
+            {status === "error" && (
+              <p className="relative mt-3 text-sm text-red-400">
+                {errorMessage}
+              </p>
+            )}
 
             <p className="relative mt-5 text-xs text-foreground/35">
               No spam. Unsubscribe anytime.
