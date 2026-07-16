@@ -7,7 +7,7 @@ import { createPortal } from "react-dom";
 import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import DebugPanel, { DEFAULT_TUNE, Tune } from "./DebugPanel";
+import DebugPanel, { DEFAULT_TUNE, LabelTune, Tune } from "./DebugPanel";
 
 /*
  * A 3D reconstruction of the actual CROSTA crisp, modeled from reference
@@ -18,12 +18,13 @@ import DebugPanel, { DEFAULT_TUNE, Tune } from "./DebugPanel";
  * Around it, a quiet Milky-Way-style galaxy: a tilted disc of gold dust
  * with faint spiral arms that thins out into space, plus a handful of
  * miniature crisps — some square, some rectangular like the 100 g batch
- * packs — drifting along the disc. The crisp sits small and deep
- * (z=-1.07) behind the disc plane (z=+1), so the whole dust field drifts
- * as a translucent veil in front of the product — a planet seen through
- * its own galaxy. The galaxy rotates on its own and ignores the cursor;
- * only the hero chip responds to it. (Composition hand-tuned by Matias
- * via the dev-only DebugPanel; rest values live in DEFAULT_TUNE.)
+ * packs — drifting along the disc. The crisp (z=-0.97) sits embedded in
+ * the disc plane (z=-0.93), so the dust wraps around the product like a
+ * ring system seen edge-on — brighter than the old veil look now that the
+ * field rides below the depth-fade knee (see makeDustMaterial). The galaxy
+ * rotates on its own and ignores the cursor; only the hero chip responds
+ * to it. (Composition hand-tuned by Matias via the dev-only DebugPanel;
+ * rest values live in DEFAULT_TUNE.)
  */
 
 // Palette sampled from the reference photos, warmed toward the brand gold
@@ -319,10 +320,10 @@ function makeStars(count: number, seed: number) {
 
 // Dust material with a depth-aware fade injected into the stock points
 // shader: brightness eases from full (world z ≤ 0.05) to half (z ≥ 0.35).
-// With the disc now riding at z≈+1 — fully forward of the deep-set chip —
-// the whole field sits past the fade knee and renders as a uniform ~50%
-// veil. That soft-focus dust is part of the hand-tuned look; don't remove
-// the fade thinking it's inert.
+// With the disc centered at z≈-0.93 (2026-07-16 re-tune), most of the field
+// sits below the knee and renders at full brightness; only the tilted
+// disc's near-camera edge crosses into the fade. That depth falloff is part
+// of the hand-tuned look; don't remove the fade thinking it's inert.
 function makeDustMaterial(size: number, opacity: number) {
   const mat = new THREE.PointsMaterial({
     vertexColors: true,
@@ -363,27 +364,26 @@ interface Mini {
 }
 
 // The whole galaxy lives on a tilted transversal plane, position/rotation/
-// scale driven by the DebugPanel tune (rest values in DEFAULT_TUNE: z=+1,
-// rotation [-0.87, -0.05, -0.35], scale 0.855 — Matias's hand-tuned
-// composition). The plane rides well in front of the deep-set chip, so the
-// dust field reads as a translucent veil the product floats behind (see
-// makeDustMaterial for the brightness fade). Minis (nested z=-0.5) and
-// stars (nested z=-1) hang back within the group, giving the field its
-// depth spread. It spins on its own and never follows the cursor.
+// scale driven by the DebugPanel tune (rest values in DEFAULT_TUNE:
+// position [-0.1, 0.14, -0.93], rotation [-0.87, -0.05, -0.35], scale 0.91
+// — Matias's hand-tuned composition). The plane sits at the chip's own
+// depth, so the dust wraps around the product rather than veiling it (see
+// makeDustMaterial for the brightness fade). Minis (nested z=-0.5 + tune
+// offset) and stars (nested z=-1 + tune offset) hang back within the
+// group, giving the field its depth spread. It spins on its own and never
+// follows the cursor.
 function Galaxy({
   geometry,
-  z,
-  scale,
-  rx,
-  ry,
-  rz,
+  galaxy,
+  dust,
+  minis: minisTune,
+  stars: starsTune,
 }: {
   geometry: THREE.BufferGeometry;
-  z: number;
-  scale: number;
-  rx: number;
-  ry: number;
-  rz: number;
+  galaxy: Tune["galaxy"];
+  dust: Tune["dust"];
+  minis: Tune["minis"];
+  stars: Tune["stars"];
 }) {
   const dustSpin = useRef<THREE.Group>(null);
   const inst = useRef<THREE.InstancedMesh>(null);
@@ -392,10 +392,11 @@ function Galaxy({
   const coarse = useMemo(() => makeDust(DUST_COARSE, 87), []);
   const stars = useMemo(() => makeStars(STARS, 133), []);
 
-  // Point sizes are pre-multiplied by the group scale (gl_PointSize ignores
-  // object scale), so the dust grain matches the old z=-1 look exactly.
-  const fineMat = useMemo(() => makeDustMaterial(0.029, 0.7), []);
-  const coarseMat = useMemo(() => makeDustMaterial(0.05, 0.55), []);
+  // Initial size/opacity mirror DEFAULT_TUNE.dust so the first frame matches
+  // the tuned look; the effect below keeps them live. (gl_PointSize ignores
+  // the group scale, so grain size is tuned directly, not via galaxy scale.)
+  const fineMat = useMemo(() => makeDustMaterial(0.027, 0.92), []);
+  const coarseMat = useMemo(() => makeDustMaterial(0.055, 0.79), []);
   useEffect(
     () => () => {
       fineMat.dispose();
@@ -403,6 +404,15 @@ function Galaxy({
     },
     [fineMat, coarseMat]
   );
+
+  // Dust tuning applies in place — size/opacity are runtime-updatable on
+  // PointsMaterial, no shader recompile needed.
+  useEffect(() => {
+    fineMat.size = dust.fineSize;
+    fineMat.opacity = dust.fineOpacity;
+    coarseMat.size = dust.coarseSize;
+    coarseMat.opacity = dust.coarseOpacity;
+  }, [fineMat, coarseMat, dust]);
 
   const minis = useMemo<Mini[]>(() => {
     const rand = mulberry32(99);
@@ -444,18 +454,20 @@ function Galaxy({
         const phi = c.phi + t * c.speed;
         // Manual elliptical orbit (y squashed) so the mini shapes themselves
         // stay undistorted.
+        const orbitR = c.radius * minisTune.radius;
         helper.obj.position.set(
-          Math.cos(phi) * c.radius,
-          Math.sin(phi) * c.radius * 0.5,
+          Math.cos(phi) * orbitR,
+          Math.sin(phi) * orbitR * 0.5,
           c.z
         );
         helper.obj.quaternion
           .copy(c.base)
           .multiply(helper.q.setFromAxisAngle(c.axis, t * c.tumble));
+        const s = c.scale * minisTune.scale;
         helper.obj.scale.set(
-          c.scale * (c.rect ? 1.8 : 1),
-          c.scale,
-          c.scale * (c.rect ? 1.05 : 1)
+          s * (c.rect ? 1.8 : 1),
+          s,
+          s * (c.rect ? 1.05 : 1)
         );
         helper.obj.updateMatrix();
         im.setMatrixAt(i, helper.obj.matrix);
@@ -465,7 +477,11 @@ function Galaxy({
   });
 
   return (
-    <group position={[0, 0, z]} rotation={[rx, ry, rz]} scale={scale}>
+    <group
+      position={[galaxy.x, galaxy.y, galaxy.z]}
+      rotation={[galaxy.rx, galaxy.ry, galaxy.rz]}
+      scale={galaxy.scale}
+    >
       {/* Squash → spin → circular disc = an ellipse with fixed axes that
           rotates in place instead of tumbling. */}
       <group scale={[1, 0.5, 1]}>
@@ -489,7 +505,7 @@ function Galaxy({
 
       {/* Minis ride slightly behind the disc plane, drifting between the
           dust and the deep-set chip. */}
-      <group position={[0, 0, -0.5]}>
+      <group position={[minisTune.x, minisTune.y, -0.5 + minisTune.z]}>
         <instancedMesh ref={inst} args={[geometry, undefined, MINIS]} frustumCulled={false}>
           <meshPhysicalMaterial
             vertexColors
@@ -503,7 +519,7 @@ function Galaxy({
       </group>
 
       {/* Stars hang furthest back in the group, a sparse backdrop. */}
-      <group position={[0, 0, -1]}>
+      <group position={[starsTune.x, starsTune.y, -1 + starsTune.z]}>
         <points frustumCulled={false}>
           <bufferGeometry>
             <bufferAttribute attach="attributes-position" args={[stars.positions, 3]} />
@@ -511,10 +527,10 @@ function Galaxy({
           </bufferGeometry>
           <pointsMaterial
             vertexColors
-            size={0.028}
+            size={starsTune.size}
             sizeAttenuation
             transparent
-            opacity={0.5}
+            opacity={starsTune.opacity}
             blending={THREE.AdditiveBlending}
             depthWrite={false}
           />
@@ -530,12 +546,11 @@ interface ChipSceneProps {
   pointer: MutableRefObject<{ x: number; y: number }>;
   spin: MutableRefObject<number>;
   hovered: MutableRefObject<boolean>;
-  chipScale: number;
   tuneRef: MutableRefObject<Tune>;
-  galaxy: Tune["galaxy"];
+  tune: Tune;
 }
 
-function ChipScene({ pointer, spin, hovered, chipScale, tuneRef, galaxy }: ChipSceneProps) {
+function ChipScene({ pointer, spin, hovered, tuneRef, tune }: ChipSceneProps) {
   const rig = useRef<THREE.Group>(null);
   const spinner = useRef<THREE.Group>(null);
 
@@ -573,12 +588,17 @@ function ChipScene({ pointer, spin, hovered, chipScale, tuneRef, galaxy }: ChipS
   return (
     <>
       {/* Rig starts at the tuned rest depth so there's no settle drift on
-          load; the frame loop keeps z pinned to tune.chip.z (-1.07). */}
-      <group ref={rig} position={[0, 0, -1.07]}>
+          load; the frame loop keeps z pinned to tune.chip.z (-0.97). */}
+      <group ref={rig} position={[0, 0, -0.97]}>
         <group ref={spinner}>
           {/* Diamond orientation with a slight casual tilt, as photographed.
-              Scaled down so it reads like the real ~2 cm crisp. */}
-          <mesh geometry={geometry} rotation={[0.1, 0, Math.PI / 4 + 0.05]} scale={chipScale}>
+              Scaled down so it reads like the real ~2 cm crisp. Tune rx/ry/rz
+              add on top of the base tilt. */}
+          <mesh
+            geometry={geometry}
+            rotation={[0.1 + tune.chip.rx, tune.chip.ry, Math.PI / 4 + 0.05 + tune.chip.rz]}
+            scale={tune.chip.scale}
+          >
             <meshPhysicalMaterial
               vertexColors
               roughness={0.72}
@@ -593,7 +613,7 @@ function ChipScene({ pointer, spin, hovered, chipScale, tuneRef, galaxy }: ChipS
         </group>
       </group>
 
-      <Galaxy geometry={geometry} z={galaxy.z} scale={galaxy.scale} rx={galaxy.rx} ry={galaxy.ry} rz={galaxy.rz} />
+      <Galaxy geometry={geometry} galaxy={tune.galaxy} dust={tune.dust} minis={tune.minis} stars={tune.stars} />
     </>
   );
 }
@@ -632,49 +652,49 @@ const HIGHLIGHTS: {
 }[] = [
   {
     text: "Rich in BCAAs",
-    pos: "top-[5%] left-[1%] sm:top-[1%] sm:left-[-23.5%]",
+    pos: "top-[5%] left-[1%] sm:top-[-2.3%] sm:left-[-34.4%]",
     depth: 10, duration: 6.5, delay: 0, mobile: true,
     conn: {
-      d: "M 22 32 C 15 27, 19 21, 14.5 16 S 12 13, 14 10.5 C 9 8.5, 1 10, -7 5.5 C -11 4.3, -13.5 6.8, -17.5 5.3",
-      from: [22, 32], to: [-17.5, 5.3], dur: 10, begin: -1, delay: 0,
+      d: "M 23.86 29.67 C 16.86 24.67, 20.86 18.67, 16.36 13.67 S 13.86 10.67, 15.86 8.17 C 10.86 6.17, 2.86 7.67, -5.14 3.17 C -9.14 1.97, -11.64 4.47, -15.64 2.97",
+      from: [23.86, 29.67], to: [-15.64, 2.97], dur: 10, begin: -1, delay: 0,
       mob: { d: "M 22 32 C 15 27, 19 21, 14.5 16 S 12 13, 14 10.5", to: [14, 10.5], dur: 7.5 },
     },
   },
   {
     text: "High in Leucine",
-    pos: "top-[7%] right-[-20.4%]",
+    pos: "top-[8.2%] right-[-24.8%]",
     depth: 14, duration: 7.5, delay: 1.2, mobile: false,
     conn: { d: "M 72 31 C 80 27, 68 24, 75 19.5 S 74 14, 84.4 11", from: [72, 31], to: [84.4, 11], dur: 9.5, begin: -4, delay: 1.5 },
   },
   {
     text: "Essential Amino Acids",
-    pos: "top-[58.9%] left-[-54.1%]",
+    pos: "top-[51.7%] left-[-78.5%]",
     depth: 7, duration: 8, delay: 0.6, mobile: false,
-    conn: { d: "M 30 69 C 21 72.5, 18 70, 12 67.2 S 0 69.5, -8 66.5 S -16 67, -20 64.8 C -26 61.5, -36 66.5, -48 62.7", from: [30, 69], to: [-48, 62.7], dur: 11.5, begin: -2.5, delay: 3 },
+    conn: { d: "M 30.23 65.05 C 21.23 68.55, 18.23 66.05, 12.23 63.25 S 0.23 65.55, -7.77 62.55 S -15.77 63.05, -19.77 60.85 C -25.77 57.55, -35.77 62.55, -47.77 58.75", from: [30.23, 65.05], to: [-47.77, 58.75], dur: 11.5, begin: -2.5, delay: 3 },
   },
   {
     text: "Vitamin B12",
-    pos: "top-[44%] right-[-8%] sm:top-[43%] sm:right-[-34.1%]",
+    pos: "top-[44%] right-[-8%] sm:top-[37%] sm:right-[-47.8%]",
     depth: 12, duration: 6, delay: 1.8, mobile: true,
     conn: {
-      d: "M 82 62 C 90 58, 81 54, 86.5 51.5 S 88 47.5, 94 46 C 98 45.2, 101.5 47.2, 106 46",
-      from: [82, 62], to: [106, 46], dur: 8.5, begin: -6, delay: 4.5,
+      d: "M 93.86 56.42 C 101.86 52.42, 92.86 48.42, 98.36 45.92 S 99.86 41.92, 105.86 40.42 C 109.86 39.62, 113.36 41.62, 117.86 40.42",
+      from: [93.86, 56.42], to: [117.86, 40.42], dur: 8.5, begin: -6, delay: 4.5,
       mob: { d: "M 82 62 C 90 58, 81 54, 86.5 51.5", to: [86.5, 51.5], dur: 7 },
     },
   },
   {
     text: "Calcium",
-    pos: "bottom-[8%] left-[3%] sm:bottom-[-3%] sm:left-[-31.5%]",
+    pos: "bottom-[8%] left-[3%] sm:bottom-[-2.3%] sm:left-[-45.5%]",
     depth: 13, duration: 7, delay: 0.9, mobile: true,
     conn: {
-      d: "M 34 74 C 24 76.5, 26 82, 15 85.8 S 2 88, -2 93 S -9 97.5, -11 99.5 C -15.5 101, -22 97.8, -27.5 99.3",
-      from: [34, 74], to: [-27.5, 99.3], dur: 12, begin: -3, delay: 6,
+      d: "M 42.37 74 C 32.37 76.5, 34.37 82, 23.37 85.8 S 10.37 88, 6.37 93 S -0.63 97.5, -2.63 99.5 C -7.13 101, -13.63 97.8, -19.13 99.3",
+      from: [42.37, 74], to: [-19.13, 99.3], dur: 12, begin: -3, delay: 6,
       mob: { d: "M 34 74 C 24 76.5, 26 82, 15 85.8", to: [15, 85.8], dur: 9.5 },
     },
   },
   {
     text: "Phosphorus",
-    pos: "bottom-[-5%] right-[-6.7%]",
+    pos: "bottom-[-3.8%] right-[-12.7%]",
     depth: 8, duration: 8.5, delay: 2.1, mobile: false,
     conn: { d: "M 64 78 C 73 80.5, 66 86, 76 90.3 S 69.5 96.5, 80.5 100.5", from: [64, 78], to: [80.5, 100.5], dur: 9.5, begin: -5, delay: 7.5 },
   },
@@ -685,7 +705,15 @@ const HIGHLIGHTS: {
 // them. They parallax at a shallow depth so they sit between the galaxy and
 // the labels; the per-path gradient fades them in from the orbit so they
 // look pulled outward rather than pinned on.
-function ConnectorLines({ sx, sy }: { sx: MotionValue<number>; sy: MotionValue<number> }) {
+function ConnectorLines({
+  sx,
+  sy,
+  labels,
+}: {
+  sx: MotionValue<number>;
+  sy: MotionValue<number>;
+  labels: LabelTune[];
+}) {
   const x = useTransform(sx, (v) => v * 5);
   const y = useTransform(sy, (v) => v * 5);
 
@@ -696,6 +724,7 @@ function ConnectorLines({ sx, sy }: { sx: MotionValue<number>; sy: MotionValue<n
   const runs = HIGHLIGHTS.flatMap((h, i) => {
     const desk = {
       id: `conn-${i}`,
+      idx: i,
       cls: "hidden sm:block",
       d: h.conn.d,
       from: h.conn.from,
@@ -730,14 +759,26 @@ function ConnectorLines({ sx, sy }: { sx: MotionValue<number>; sy: MotionValue<n
             </linearGradient>
           ))}
         </defs>
-        {runs.map((r) => (
-          <g key={r.id} className={r.cls}>
+        {runs.map((r) => {
+          // Tune: lineDx/lineDy arrive in px and convert to viewBox units
+          // (430px desktop container / 100 units = ÷4.3); the userSpaceOnUse
+          // gradient rides along with the <g> transform. lineOpacity
+          // multiplies on top of the .conn-line shimmer and the spark's own
+          // opacity animation.
+          const lt = labels[r.idx];
+          return (
+          <g
+            key={r.id}
+            className={r.cls}
+            transform={`translate(${lt.lineDx / 4.3} ${lt.lineDy / 4.3})`}
+            opacity={lt.lineOpacity}
+          >
             <path
               id={`${r.id}-path`}
               d={r.d}
               fill="none"
               stroke={`url(#${r.id}-grad)`}
-              strokeWidth={1.3}
+              strokeWidth={lt.lineWidth}
               strokeLinecap="round"
               vectorEffect="non-scaling-stroke"
               className="conn-line"
@@ -760,7 +801,8 @@ function ConnectorLines({ sx, sy }: { sx: MotionValue<number>; sy: MotionValue<n
               />
             </circle>
           </g>
-        ))}
+          );
+        })}
       </svg>
     </motion.div>
   );
@@ -784,7 +826,7 @@ function FloatLabel({
   mobile: boolean;
   sx: MotionValue<number>;
   sy: MotionValue<number>;
-  nudge: { dx: number; dy: number };
+  nudge: LabelTune;
   children: ReactNode;
 }) {
   // Each label parallaxes at its own depth, drifting gently against the
@@ -807,7 +849,19 @@ function FloatLabel({
           className="flex items-center gap-2 whitespace-nowrap text-[12px] font-medium uppercase tracking-[0.19em] text-foreground/45"
           style={{ textShadow: "0 0 16px rgba(216, 181, 91, 0.3)" }}
         >
-          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-gold/50" />
+          {/* Two dots, one per breakpoint: phones keep the stock inline dot;
+              from sm: up the dot takes its hand-tuned size and offset from
+              the tune (dot placement was composed on desktop only — some
+              dots sit far from their word, out along the filament). */}
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-gold/50 sm:hidden" />
+          <span
+            className="hidden shrink-0 rounded-full bg-gold/50 sm:block"
+            style={{
+              width: nudge.dotSize,
+              height: nudge.dotSize,
+              transform: `translate(${nudge.dotDx}px, ${nudge.dotDy}px)`,
+            }}
+          />
           {children}
         </motion.span>
       </div>
@@ -883,18 +937,11 @@ export default function ChipVisual() {
         <directionalLight position={[4, 5, 1.5]} intensity={0.46} color="#ffe2ae" />
         <directionalLight position={[-3.5, -2, 2.5]} intensity={0.28} color="#d8b55b" />
         <directionalLight position={[0, 2, -4]} intensity={0.4} color="#e8cd8a" />
-        <ChipScene
-          pointer={pointer}
-          spin={spin}
-          hovered={hovered}
-          chipScale={tune.chip.scale}
-          tuneRef={tuneRef}
-          galaxy={tune.galaxy}
-        />
+        <ChipScene pointer={pointer} spin={spin} hovered={hovered} tuneRef={tuneRef} tune={tune} />
       </Canvas>
 
       {/* Filaments flowing from the orbit out to each nutrient label. */}
-      <ConnectorLines sx={sx} sy={sy} />
+      <ConnectorLines sx={sx} sy={sy} labels={tune.labels} />
 
       {/* Floating nutrient highlights — quiet, parallaxed, never competing
           with the chip. */}
