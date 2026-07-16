@@ -2,10 +2,12 @@
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { motion, useMotionValue, useSpring, useTransform, MotionValue } from "framer-motion";
-import { MutableRefObject, ReactNode, useEffect, useMemo, useRef } from "react";
+import { MutableRefObject, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import DebugPanel, { DEFAULT_TUNE, Tune } from "./DebugPanel";
 
 /*
  * A 3D reconstruction of the actual CROSTA crisp, modeled from reference
@@ -16,10 +18,12 @@ import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
  * Around it, a quiet Milky-Way-style galaxy: a tilted disc of gold dust
  * with faint spiral arms that thins out into space, plus a handful of
  * miniature crisps — some square, some rectangular like the 100 g batch
- * packs — drifting along the disc. The disc straddles the crisp's depth,
- * so its upper sweep slips behind the product while a dim veil of the
- * lower sweep passes in front. The galaxy rotates on its own and
- * ignores the cursor; only the hero chip responds to it.
+ * packs — drifting along the disc. The crisp sits small and deep
+ * (z=-1.07) behind the disc plane (z=+1), so the whole dust field drifts
+ * as a translucent veil in front of the product — a planet seen through
+ * its own galaxy. The galaxy rotates on its own and ignores the cursor;
+ * only the hero chip responds to it. (Composition hand-tuned by Matias
+ * via the dev-only DebugPanel; rest values live in DEFAULT_TUNE.)
  */
 
 // Palette sampled from the reference photos, warmed toward the brand gold
@@ -314,11 +318,11 @@ function makeStars(count: number, seed: number) {
 }
 
 // Dust material with a depth-aware fade injected into the stock points
-// shader: strands swinging toward the viewer dim to a thin veil, so the
-// stretch of orbit that passes in front of the crisp reads as atmosphere
-// and never competes with the product. Dust at or behind the chip's
-// depth keeps full brightness; by z ≈ +0.35 (its forward extreme) it
-// fades to half — still perceptible against the crisp, never a screen.
+// shader: brightness eases from full (world z ≤ 0.05) to half (z ≥ 0.35).
+// With the disc now riding at z≈+1 — fully forward of the deep-set chip —
+// the whole field sits past the fade knee and renders as a uniform ~50%
+// veil. That soft-focus dust is part of the hand-tuned look; don't remove
+// the fade thinking it's inert.
 function makeDustMaterial(size: number, opacity: number) {
   const mat = new THREE.PointsMaterial({
     vertexColors: true,
@@ -358,16 +362,29 @@ interface Mini {
   speed: number;
 }
 
-// The whole galaxy lives on a transversal plane that straddles the hero
-// chip's depth (z=-0.1, scaled 0.855 so its apparent size matches the old
-// z=-1 placement): tilted like a spiral galaxy seen at a slight angle,
-// squashed into an ellipse. Because the disc now crosses the chip, the
-// depth buffer hides the upper sweep behind the product while the lower
-// sweep drifts in front as a dim veil (see makeDustMaterial) — the crisp
-// sits INSIDE the galaxy like a planet in its rings. Minis and stars are
-// nested in groups pushed further back so only dust ever crosses in
-// front. It spins on its own and never follows the cursor.
-function Galaxy({ geometry }: { geometry: THREE.BufferGeometry }) {
+// The whole galaxy lives on a tilted transversal plane, position/rotation/
+// scale driven by the DebugPanel tune (rest values in DEFAULT_TUNE: z=+1,
+// rotation [-0.87, -0.05, -0.35], scale 0.855 — Matias's hand-tuned
+// composition). The plane rides well in front of the deep-set chip, so the
+// dust field reads as a translucent veil the product floats behind (see
+// makeDustMaterial for the brightness fade). Minis (nested z=-0.5) and
+// stars (nested z=-1) hang back within the group, giving the field its
+// depth spread. It spins on its own and never follows the cursor.
+function Galaxy({
+  geometry,
+  z,
+  scale,
+  rx,
+  ry,
+  rz,
+}: {
+  geometry: THREE.BufferGeometry;
+  z: number;
+  scale: number;
+  rx: number;
+  ry: number;
+  rz: number;
+}) {
   const dustSpin = useRef<THREE.Group>(null);
   const inst = useRef<THREE.InstancedMesh>(null);
 
@@ -448,7 +465,7 @@ function Galaxy({ geometry }: { geometry: THREE.BufferGeometry }) {
   });
 
   return (
-    <group position={[0, 0, -0.1]} rotation={[-0.35, 0, -0.1]} scale={0.855}>
+    <group position={[0, 0, z]} rotation={[rx, ry, rz]} scale={scale}>
       {/* Squash → spin → circular disc = an ellipse with fixed axes that
           rotates in place instead of tumbling. */}
       <group scale={[1, 0.5, 1]}>
@@ -470,9 +487,8 @@ function Galaxy({ geometry }: { geometry: THREE.BufferGeometry }) {
         </group>
       </group>
 
-      {/* Minis ride slightly behind the disc plane: their tilt-forward
-          excursion tops out just behind the chip's front surface, so an
-          opaque mini never slides across the hero product. */}
+      {/* Minis ride slightly behind the disc plane, drifting between the
+          dust and the deep-set chip. */}
       <group position={[0, 0, -0.5]}>
         <instancedMesh ref={inst} args={[geometry, undefined, MINIS]} frustumCulled={false}>
           <meshPhysicalMaterial
@@ -486,7 +502,7 @@ function Galaxy({ geometry }: { geometry: THREE.BufferGeometry }) {
         </instancedMesh>
       </group>
 
-      {/* Stars stay a distant backdrop, ~where the whole galaxy used to sit. */}
+      {/* Stars hang furthest back in the group, a sparse backdrop. */}
       <group position={[0, 0, -1]}>
         <points frustumCulled={false}>
           <bufferGeometry>
@@ -514,9 +530,12 @@ interface ChipSceneProps {
   pointer: MutableRefObject<{ x: number; y: number }>;
   spin: MutableRefObject<number>;
   hovered: MutableRefObject<boolean>;
+  chipScale: number;
+  tuneRef: MutableRefObject<Tune>;
+  galaxy: Tune["galaxy"];
 }
 
-function ChipScene({ pointer, spin, hovered }: ChipSceneProps) {
+function ChipScene({ pointer, spin, hovered, chipScale, tuneRef, galaxy }: ChipSceneProps) {
   const rig = useRef<THREE.Group>(null);
   const spinner = useRef<THREE.Group>(null);
 
@@ -528,6 +547,7 @@ function ChipScene({ pointer, spin, hovered }: ChipSceneProps) {
     const sp = spinner.current;
     if (!rg || !sp) return;
 
+    const offset = tuneRef.current.chip;
     const t = state.clock.elapsedTime;
     const dt = Math.min(delta, 0.1);
     const k = 1 - Math.exp(-5 * dt);
@@ -536,10 +556,12 @@ function ChipScene({ pointer, spin, hovered }: ChipSceneProps) {
     rg.rotation.y += (pointer.current.x * 0.55 - rg.rotation.y) * k;
     rg.rotation.x += (pointer.current.y * 0.42 - rg.rotation.x) * k;
 
-    // Slight positional parallax plus a slow idle float.
-    rg.position.x += (pointer.current.x * 0.13 - rg.position.x) * k;
+    // Slight positional parallax plus a slow idle float, offset by the
+    // (normally zero) debug-panel nudge.
+    rg.position.x += (pointer.current.x * 0.13 + offset.x - rg.position.x) * k;
     const bobY = Math.sin(t * 0.8) * 0.05 - pointer.current.y * 0.09;
-    rg.position.y += (bobY - rg.position.y) * k;
+    rg.position.y += (bobY + offset.y - rg.position.y) * k;
+    rg.position.z += (offset.z - rg.position.z) * k;
 
     // Click-to-spin settles with its own softer damping.
     sp.rotation.y += (spin.current - sp.rotation.y) * (1 - Math.exp(-3.2 * dt));
@@ -550,11 +572,13 @@ function ChipScene({ pointer, spin, hovered }: ChipSceneProps) {
 
   return (
     <>
-      <group ref={rig}>
+      {/* Rig starts at the tuned rest depth so there's no settle drift on
+          load; the frame loop keeps z pinned to tune.chip.z (-1.07). */}
+      <group ref={rig} position={[0, 0, -1.07]}>
         <group ref={spinner}>
           {/* Diamond orientation with a slight casual tilt, as photographed.
               Scaled down so it reads like the real ~2 cm crisp. */}
-          <mesh geometry={geometry} rotation={[0.1, 0, Math.PI / 4 + 0.05]} scale={0.75}>
+          <mesh geometry={geometry} rotation={[0.1, 0, Math.PI / 4 + 0.05]} scale={chipScale}>
             <meshPhysicalMaterial
               vertexColors
               roughness={0.72}
@@ -569,7 +593,7 @@ function ChipScene({ pointer, spin, hovered }: ChipSceneProps) {
         </group>
       </group>
 
-      <Galaxy geometry={geometry} />
+      <Galaxy geometry={geometry} z={galaxy.z} scale={galaxy.scale} rx={galaxy.rx} ry={galaxy.ry} rz={galaxy.rz} />
     </>
   );
 }
@@ -608,51 +632,51 @@ const HIGHLIGHTS: {
 }[] = [
   {
     text: "Rich in BCAAs",
-    pos: "top-[5%] left-[1%] sm:top-[1%] sm:left-[-13%]",
+    pos: "top-[5%] left-[1%] sm:top-[1%] sm:left-[-23.5%]",
     depth: 10, duration: 6.5, delay: 0, mobile: true,
     conn: {
-      d: "M 22 32 C 15 27, 19 21, 14.5 16 S 12 13, 14 10.5 C 9 8.5, 1 10, -7 5.5",
-      from: [22, 32], to: [-7, 5.5], dur: 9, begin: -1, delay: 0,
+      d: "M 22 32 C 15 27, 19 21, 14.5 16 S 12 13, 14 10.5 C 9 8.5, 1 10, -7 5.5 C -11 4.3, -13.5 6.8, -17.5 5.3",
+      from: [22, 32], to: [-17.5, 5.3], dur: 10, begin: -1, delay: 0,
       mob: { d: "M 22 32 C 15 27, 19 21, 14.5 16 S 12 13, 14 10.5", to: [14, 10.5], dur: 7.5 },
     },
   },
   {
     text: "High in Leucine",
-    pos: "top-[7%] right-[-16%]",
+    pos: "top-[7%] right-[-20.4%]",
     depth: 14, duration: 7.5, delay: 1.2, mobile: false,
-    conn: { d: "M 72 31 C 80 27, 68 24, 75 19.5 S 74 14, 80 11", from: [72, 31], to: [80, 11], dur: 9.5, begin: -4, delay: 1.5 },
+    conn: { d: "M 72 31 C 80 27, 68 24, 75 19.5 S 74 14, 84.4 11", from: [72, 31], to: [84.4, 11], dur: 9.5, begin: -4, delay: 1.5 },
   },
   {
     text: "Essential Amino Acids",
-    pos: "top-[61%] left-[-26%]",
+    pos: "top-[58.9%] left-[-54.1%]",
     depth: 7, duration: 8, delay: 0.6, mobile: false,
-    conn: { d: "M 30 69 C 21 72.5, 18 70, 12 67.2 S 0 69.5, -8 66.5 S -16 67, -20 64.8", from: [30, 69], to: [-20, 64.8], dur: 10, begin: -2.5, delay: 3 },
+    conn: { d: "M 30 69 C 21 72.5, 18 70, 12 67.2 S 0 69.5, -8 66.5 S -16 67, -20 64.8 C -26 61.5, -36 66.5, -48 62.7", from: [30, 69], to: [-48, 62.7], dur: 11.5, begin: -2.5, delay: 3 },
   },
   {
     text: "Vitamin B12",
-    pos: "top-[44%] right-[-8%] sm:top-[43%] sm:right-[-22%]",
+    pos: "top-[44%] right-[-8%] sm:top-[43%] sm:right-[-34.1%]",
     depth: 12, duration: 6, delay: 1.8, mobile: true,
     conn: {
-      d: "M 82 62 C 90 58, 81 54, 86.5 51.5 S 88 47.5, 94 46",
-      from: [82, 62], to: [94, 46], dur: 8, begin: -6, delay: 4.5,
+      d: "M 82 62 C 90 58, 81 54, 86.5 51.5 S 88 47.5, 94 46 C 98 45.2, 101.5 47.2, 106 46",
+      from: [82, 62], to: [106, 46], dur: 8.5, begin: -6, delay: 4.5,
       mob: { d: "M 82 62 C 90 58, 81 54, 86.5 51.5", to: [86.5, 51.5], dur: 7 },
     },
   },
   {
     text: "Calcium",
-    pos: "bottom-[8%] left-[3%] sm:bottom-[-3%] sm:left-[-15%]",
+    pos: "bottom-[8%] left-[3%] sm:bottom-[-3%] sm:left-[-31.5%]",
     depth: 13, duration: 7, delay: 0.9, mobile: true,
     conn: {
-      d: "M 34 74 C 24 76.5, 26 82, 15 85.8 S 2 88, -2 93 S -9 97.5, -11 99.5",
-      from: [34, 74], to: [-11, 99.5], dur: 11, begin: -3, delay: 6,
+      d: "M 34 74 C 24 76.5, 26 82, 15 85.8 S 2 88, -2 93 S -9 97.5, -11 99.5 C -15.5 101, -22 97.8, -27.5 99.3",
+      from: [34, 74], to: [-27.5, 99.3], dur: 12, begin: -3, delay: 6,
       mob: { d: "M 34 74 C 24 76.5, 26 82, 15 85.8", to: [15, 85.8], dur: 9.5 },
     },
   },
   {
     text: "Phosphorus",
-    pos: "bottom-[-5%] right-[-2%]",
+    pos: "bottom-[-5%] right-[-6.7%]",
     depth: 8, duration: 8.5, delay: 2.1, mobile: false,
-    conn: { d: "M 64 78 C 73 80.5, 66 86, 76 90.3 S 69.5 96.5, 76 100.5", from: [64, 78], to: [76, 100.5], dur: 9.5, begin: -5, delay: 7.5 },
+    conn: { d: "M 64 78 C 73 80.5, 66 86, 76 90.3 S 69.5 96.5, 80.5 100.5", from: [64, 78], to: [80.5, 100.5], dur: 9.5, begin: -5, delay: 7.5 },
   },
 ];
 
@@ -750,6 +774,7 @@ function FloatLabel({
   mobile,
   sx,
   sy,
+  nudge,
   children,
 }: {
   pos: string;
@@ -759,6 +784,7 @@ function FloatLabel({
   mobile: boolean;
   sx: MotionValue<number>;
   sy: MotionValue<number>;
+  nudge: { dx: number; dy: number };
   children: ReactNode;
 }) {
   // Each label parallaxes at its own depth, drifting gently against the
@@ -772,15 +798,19 @@ function FloatLabel({
       style={{ x, y }}
       className={`absolute ${pos} ${mobile ? "flex" : "hidden sm:flex"}`}
     >
-      <motion.span
-        animate={{ y: [0, -5, 0] }}
-        transition={{ duration, repeat: Infinity, ease: "easeInOut", delay }}
-        className="flex items-center gap-2 whitespace-nowrap text-[12px] font-medium uppercase tracking-[0.19em] text-foreground/45"
-        style={{ textShadow: "0 0 16px rgba(216, 181, 91, 0.3)" }}
-      >
-        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-gold/50" />
-        {children}
-      </motion.span>
+      {/* Plain (non-framer) wrapper so the debug-panel nudge — normally
+          {0,0} — applies instantly without waiting on the cursor springs. */}
+      <div style={{ transform: `translate(${nudge.dx}px, ${nudge.dy}px)` }}>
+        <motion.span
+          animate={{ y: [0, -5, 0] }}
+          transition={{ duration, repeat: Infinity, ease: "easeInOut", delay }}
+          className="flex items-center gap-2 whitespace-nowrap text-[12px] font-medium uppercase tracking-[0.19em] text-foreground/45"
+          style={{ textShadow: "0 0 16px rgba(216, 181, 91, 0.3)" }}
+        >
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-gold/50" />
+          {children}
+        </motion.span>
+      </div>
     </motion.div>
   );
 }
@@ -791,6 +821,16 @@ export default function ChipVisual() {
   const pointer = useRef({ x: 0, y: 0 });
   const spin = useRef(0);
   const hovered = useRef(false);
+
+  // Live-tunable overrides for the debug panel — every field defaults to the
+  // value already baked into the scene below, so leaving the panel alone
+  // reproduces the committed look exactly. tuneRef mirrors the state for the
+  // r3f frame loop, which can't read React state directly without going stale.
+  const [tune, setTune] = useState<Tune>(() => JSON.parse(JSON.stringify(DEFAULT_TUNE)));
+  const tuneRef = useRef(tune);
+  useEffect(() => {
+    tuneRef.current = tune;
+  }, [tune]);
 
   const mx = useMotionValue(0);
   const my = useMotionValue(0);
@@ -813,8 +853,9 @@ export default function ChipVisual() {
   }, [mx, my]);
 
   return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.92, y: 16 }}
+    <>
+      <motion.div
+        initial={{ opacity: 0, scale: 0.92, y: 16 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
       transition={{ duration: 1.1, ease: [0.22, 1, 0.36, 1], delay: 0.35 }}
       onClick={() => (spin.current += Math.PI * 2)}
@@ -842,7 +883,14 @@ export default function ChipVisual() {
         <directionalLight position={[4, 5, 1.5]} intensity={0.46} color="#ffe2ae" />
         <directionalLight position={[-3.5, -2, 2.5]} intensity={0.28} color="#d8b55b" />
         <directionalLight position={[0, 2, -4]} intensity={0.4} color="#e8cd8a" />
-        <ChipScene pointer={pointer} spin={spin} hovered={hovered} />
+        <ChipScene
+          pointer={pointer}
+          spin={spin}
+          hovered={hovered}
+          chipScale={tune.chip.scale}
+          tuneRef={tuneRef}
+          galaxy={tune.galaxy}
+        />
       </Canvas>
 
       {/* Filaments flowing from the orbit out to each nutrient label. */}
@@ -851,7 +899,7 @@ export default function ChipVisual() {
       {/* Floating nutrient highlights — quiet, parallaxed, never competing
           with the chip. */}
       <div className="pointer-events-none absolute inset-0 z-20">
-        {HIGHLIGHTS.map((h) => (
+        {HIGHLIGHTS.map((h, i) => (
           <FloatLabel
             key={h.text}
             pos={h.pos}
@@ -861,11 +909,22 @@ export default function ChipVisual() {
             mobile={h.mobile}
             sx={sx}
             sy={sy}
+            nudge={tune.labels[i]}
           >
             {h.text}
           </FloatLabel>
         ))}
       </div>
     </motion.div>
+
+    {/* TEMP — dev-only tuning panel, tree-shaken out of production builds.
+        Portaled to <body> so it isn't clipped by the hero's own transform. */}
+    {process.env.NODE_ENV !== "production" &&
+      typeof document !== "undefined" &&
+      createPortal(
+        <DebugPanel tune={tune} setTune={setTune} labelNames={HIGHLIGHTS.map((h) => h.text)} />,
+        document.body
+      )}
+    </>
   );
 }
