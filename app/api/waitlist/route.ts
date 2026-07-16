@@ -46,65 +46,75 @@ export async function POST(request: Request) {
     );
   }
 
-  const supabase = getSupabaseAdmin();
+  try {
+    const supabase = getSupabaseAdmin();
 
-  const { data: existing, error: lookupError } = await supabase
-    .from("waitlist")
-    .select("coupon_code")
-    .eq("email", email)
-    .maybeSingle();
-
-  if (lookupError) {
-    return NextResponse.json(
-      { error: "Something went wrong. Please try again." },
-      { status: 500 }
-    );
-  }
-
-  if (existing) {
-    return NextResponse.json({ couponCode: existing.coupon_code });
-  }
-
-  // Try a few times in case a generated code collides with an existing one,
-  // or a concurrent request grabs the same email first.
-  const MAX_ATTEMPTS = 5;
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const couponCode = generateCouponCode();
-
-    const { data: inserted, error: insertError } = await supabase
+    const { data: existing, error: lookupError } = await supabase
       .from("waitlist")
-      .insert({ email, coupon_code: couponCode })
       .select("coupon_code")
-      .single();
+      .eq("email", email)
+      .maybeSingle();
 
-    if (!insertError) {
-      return NextResponse.json({ couponCode: inserted.coupon_code });
+    if (lookupError) {
+      console.error("waitlist lookup error:", lookupError);
+      return NextResponse.json(
+        { error: "Something went wrong. Please try again." },
+        { status: 500 }
+      );
     }
 
-    if (isUniqueViolation(insertError)) {
-      // If it was the email that collided, someone else just signed up
-      // with it concurrently — return their coupon instead of erroring.
-      const { data: raceWinner } = await supabase
-        .from("waitlist")
-        .select("coupon_code")
-        .eq("email", email)
-        .maybeSingle();
+    if (existing) {
+      return NextResponse.json({ couponCode: existing.coupon_code });
+    }
 
-      if (raceWinner) {
-        return NextResponse.json({ couponCode: raceWinner.coupon_code });
+    // Try a few times in case a generated code collides with an existing one,
+    // or a concurrent request grabs the same email first.
+    const MAX_ATTEMPTS = 5;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const couponCode = generateCouponCode();
+
+      const { data: inserted, error: insertError } = await supabase
+        .from("waitlist")
+        .insert({ email, coupon_code: couponCode })
+        .select("coupon_code")
+        .single();
+
+      if (!insertError) {
+        return NextResponse.json({ couponCode: inserted.coupon_code });
       }
-      // Otherwise it was the coupon code that collided — loop and retry.
-      continue;
+
+      if (isUniqueViolation(insertError)) {
+        // If it was the email that collided, someone else just signed up
+        // with it concurrently — return their coupon instead of erroring.
+        const { data: raceWinner } = await supabase
+          .from("waitlist")
+          .select("coupon_code")
+          .eq("email", email)
+          .maybeSingle();
+
+        if (raceWinner) {
+          return NextResponse.json({ couponCode: raceWinner.coupon_code });
+        }
+        // Otherwise it was the coupon code that collided — loop and retry.
+        continue;
+      }
+
+      console.error("waitlist insert error:", insertError);
+      return NextResponse.json(
+        { error: "Something went wrong. Please try again." },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json(
       { error: "Something went wrong. Please try again." },
       { status: 500 }
     );
+  } catch (err) {
+    console.error("waitlist route crashed:", err);
+    return NextResponse.json(
+      { error: "Something went wrong. Please try again." },
+      { status: 500 }
+    );
   }
-
-  return NextResponse.json(
-    { error: "Something went wrong. Please try again." },
-    { status: 500 }
-  );
 }
