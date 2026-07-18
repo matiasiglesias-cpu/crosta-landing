@@ -19,7 +19,8 @@ export default function PrivacyPage() {
           </h2>
           <p className="mt-2">
             When you join the waitlist, we store your email address, name,
-            birth year, city, and the coupon code we generate for you.
+            birth year, postal code, Helsinki neighborhood, and the coupon
+            code we generate for you.
           </p>
         </section>
 

@@ -10,9 +10,10 @@ import {
   Gift,
   Copy,
   Check,
+  MapPin,
 } from "lucide-react";
 import RevealOnScroll from "./RevealOnScroll";
-import { FINLAND_CITIES } from "@/lib/finlandCities";
+import { helsinkiAreasFor } from "@/lib/helsinkiAreas";
 
 type Status = "idle" | "loading" | "success" | "error";
 
@@ -29,7 +30,8 @@ export default function EmailSignup() {
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [birthYear, setBirthYear] = useState("");
-  const [city, setCity] = useState("");
+  const [postalCode, setPostalCode] = useState("");
+  const [neighborhood, setNeighborhood] = useState("");
   const [consent, setConsent] = useState(false);
   const [website, setWebsite] = useState(""); // honeypot — real users leave this blank
   const [turnstileToken, setTurnstileToken] = useState("");
@@ -45,10 +47,25 @@ export default function EmailSignup() {
     };
   }, []);
 
+  // The neighborhoods this postal code covers — null until a full Helsinki
+  // code is typed. Drives both the picker and the "not Helsinki yet" note.
+  const areas = postalCode.length === 5 ? helsinkiAreasFor(postalCode) : null;
+  const outsideHelsinki = postalCode.length === 5 && !areas;
+
+  const handlePostalChange = (value: string) => {
+    const digits = value.replace(/\D/g, "").slice(0, 5);
+    setPostalCode(digits);
+    const nextAreas = digits.length === 5 ? helsinkiAreasFor(digits) : null;
+    // Auto-pick when the code maps to a single neighborhood; otherwise let
+    // the visitor choose (and clear any stale pick from a previous code).
+    setNeighborhood(nextAreas && nextAreas.length === 1 ? nextAreas[0] : "");
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (status === "loading") return;
-    if (!email.trim() || !name.trim() || !birthYear || !city || !consent) return;
+    if (!email.trim() || !name.trim() || !birthYear || !consent) return;
+    if (!areas || !neighborhood || !areas.includes(neighborhood)) return;
 
     setStatus("loading");
     try {
@@ -59,7 +76,8 @@ export default function EmailSignup() {
           email: email.trim(),
           name: name.trim(),
           birthYear: Number(birthYear),
-          city,
+          postalCode,
+          neighborhood,
           consent,
           website,
           turnstileToken,
@@ -121,7 +139,7 @@ export default function EmailSignup() {
             <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-foreground/60 sm:text-base">
               Join the waitlist and get 2-for-1 on your first order — plus
               early access, launch pricing, and news from the kitchen.
-              Delivered anywhere in Finland.
+              Launching first across Helsinki, neighborhood by neighborhood.
             </p>
 
             <AnimatePresence mode="wait">
@@ -223,22 +241,69 @@ export default function EmailSignup() {
                       max={CURRENT_YEAR}
                       className="w-1/2 rounded-full border border-white/10 bg-background/60 px-5 py-3.5 text-sm text-foreground placeholder:text-foreground/35 outline-none transition-colors duration-300 focus:border-gold/50"
                     />
-                    <select
+                    <input
+                      type="text"
                       required
-                      value={city}
-                      onChange={(e) => setCity(e.target.value)}
-                      className="w-1/2 rounded-full border border-white/10 bg-background/60 px-5 py-3.5 text-sm text-foreground outline-none transition-colors duration-300 focus:border-gold/50"
-                    >
-                      <option value="" disabled>
-                        City
-                      </option>
-                      {FINLAND_CITIES.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
-                      ))}
-                    </select>
+                      inputMode="numeric"
+                      value={postalCode}
+                      onChange={(e) => handlePostalChange(e.target.value)}
+                      placeholder="Postal code — 00xxx"
+                      maxLength={5}
+                      pattern="\d{5}"
+                      aria-label="Helsinki postal code"
+                      className="w-1/2 rounded-full border border-white/10 bg-background/60 px-5 py-3.5 text-sm text-foreground placeholder:text-foreground/35 outline-none transition-colors duration-300 focus:border-gold/50"
+                    />
                   </div>
+
+                  <AnimatePresence initial={false}>
+                    {areas && (
+                      <motion.div
+                        key="neighborhood"
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        transition={{ duration: 0.25, ease: "easeOut" }}
+                        className="overflow-hidden"
+                      >
+                        <div className="flex gap-3">
+                          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-gold/30 bg-gold/10 px-4 text-sm text-gold-light">
+                            <MapPin className="h-3.5 w-3.5" strokeWidth={1.75} />
+                            Helsinki
+                          </span>
+                          <select
+                            required
+                            value={neighborhood}
+                            onChange={(e) => setNeighborhood(e.target.value)}
+                            aria-label="Your neighborhood"
+                            className="w-full rounded-full border border-white/10 bg-background/60 px-5 py-3.5 text-sm text-foreground outline-none transition-colors duration-300 focus:border-gold/50"
+                          >
+                            <option value="" disabled>
+                              Your neighborhood
+                            </option>
+                            {areas.map((a) => (
+                              <option key={a} value={a}>
+                                {a}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </motion.div>
+                    )}
+                    {outsideHelsinki && (
+                      <motion.p
+                        key="outside"
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        transition={{ duration: 0.25, ease: "easeOut" }}
+                        className="overflow-hidden px-1 text-xs leading-relaxed text-amber-300/90"
+                      >
+                        We&apos;re launching in Helsinki first — this postal
+                        code isn&apos;t a Helsinki one (yet). Follow along, more
+                        of Finland is coming.
+                      </motion.p>
+                    )}
+                  </AnimatePresence>
 
                   {TURNSTILE_SITE_KEY && (
                     <div

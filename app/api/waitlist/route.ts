@@ -2,12 +2,12 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { checkRequestRateLimit, claimIpSlot, releaseIpSlot } from "@/lib/ratelimit";
 import { verifyTurnstile } from "@/lib/turnstile";
-import { FINLAND_CITIES } from "@/lib/finlandCities";
+import { helsinkiAreasFor } from "@/lib/helsinkiAreas";
 
 export const dynamic = "force-dynamic";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const CITY_SET = new Set<string>(FINLAND_CITIES);
+const POSTAL_RE = /^\d{5}$/;
 const CURRENT_YEAR = new Date().getFullYear();
 
 // Unambiguous characters only (no 0/O, 1/I/L).
@@ -88,14 +88,33 @@ export async function POST(request: Request) {
     );
   }
 
-  const rawCity = fields?.city;
-  if (typeof rawCity !== "string" || !CITY_SET.has(rawCity)) {
+  const rawPostal = fields?.postalCode;
+  const postalCode = typeof rawPostal === "string" ? rawPostal.trim() : "";
+  if (!POSTAL_RE.test(postalCode)) {
     return NextResponse.json(
-      { error: "Please select a valid city." },
+      { error: "Please enter a valid postal code." },
       { status: 400 }
     );
   }
-  const city = rawCity;
+  const areas = helsinkiAreasFor(postalCode);
+  if (!areas) {
+    return NextResponse.json(
+      {
+        error:
+          "We're launching in Helsinki first — this postal code isn't a Helsinki one yet.",
+      },
+      { status: 400 }
+    );
+  }
+
+  const rawNeighborhood = fields?.neighborhood;
+  if (typeof rawNeighborhood !== "string" || !areas.includes(rawNeighborhood)) {
+    return NextResponse.json(
+      { error: "Please choose your Helsinki neighborhood." },
+      { status: 400 }
+    );
+  }
+  const neighborhood = rawNeighborhood;
 
   if (fields?.consent !== true) {
     return NextResponse.json(
@@ -160,7 +179,10 @@ export async function POST(request: Request) {
           coupon_code: couponCode,
           name,
           birth_year: birthYear,
-          city,
+          // Every signup is Helsinki for now; keep the chosen neighborhood
+          // visible in the same column ("Helsinki – Punavuori").
+          city: `Helsinki – ${neighborhood}`,
+          postal_code: postalCode,
           consented_at: new Date().toISOString(),
         })
         .select("coupon_code")
