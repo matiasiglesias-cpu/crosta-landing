@@ -1,9 +1,14 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { checkRequestRateLimit, claimIpSlot, releaseIpSlot } from "@/lib/ratelimit";
+import { verifyTurnstile } from "@/lib/turnstile";
+import { FINLAND_CITIES } from "@/lib/finlandCities";
 
 export const dynamic = "force-dynamic";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const CITY_SET = new Set<string>(FINLAND_CITIES);
+const CURRENT_YEAR = new Date().getFullYear();
 
 // Unambiguous characters only (no 0/O, 1/I/L).
 const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -22,6 +27,12 @@ const isUniqueViolation = (error: unknown) =>
   "code" in error &&
   (error as { code?: string }).code === "23505";
 
+function getClientIp(request: Request): string {
+  const forwardedFor = request.headers.get("x-forwarded-for");
+  if (forwardedFor) return forwardedFor.split(",")[0].trim();
+  return request.headers.get("x-real-ip") || "unknown";
+}
+
 export async function POST(request: Request) {
   let body: unknown;
   try {
@@ -33,15 +44,73 @@ export async function POST(request: Request) {
     );
   }
 
-  const rawEmail = (body as { email?: unknown } | null)?.email;
+  const fields = body as Record<string, unknown> | null;
+  const ip = getClientIp(request);
+
+  // Honeypot: real visitors never fill this hidden field. Bots that
+  // auto-fill every input will. Pretend it worked so scrapers don't learn
+  // the check exists, but never touch the database.
+  if (typeof fields?.website === "string" && fields.website.trim() !== "") {
+    return NextResponse.json({ couponCode: generateCouponCode() });
+  }
+
+  const withinRateLimit = await checkRequestRateLimit(ip);
+  if (!withinRateLimit) {
+    return NextResponse.json(
+      { error: "Too many attempts. Please try again in a minute." },
+      { status: 429 }
+    );
+  }
+
+  const rawEmail = fields?.email;
   if (typeof rawEmail !== "string") {
     return NextResponse.json({ error: "Email is required." }, { status: 400 });
   }
-
   const email = rawEmail.trim().toLowerCase();
   if (!email || email.length > 254 || !EMAIL_RE.test(email)) {
     return NextResponse.json(
       { error: "Please enter a valid email address." },
+      { status: 400 }
+    );
+  }
+
+  const rawName = fields?.name;
+  if (typeof rawName !== "string" || !rawName.trim() || rawName.trim().length > 100) {
+    return NextResponse.json({ error: "Please enter your name." }, { status: 400 });
+  }
+  const name = rawName.trim();
+
+  const birthYear = Number(fields?.birthYear);
+  if (!Number.isInteger(birthYear) || birthYear < 1900 || birthYear > CURRENT_YEAR) {
+    return NextResponse.json(
+      { error: "Please enter a valid birth year." },
+      { status: 400 }
+    );
+  }
+
+  const rawCity = fields?.city;
+  if (typeof rawCity !== "string" || !CITY_SET.has(rawCity)) {
+    return NextResponse.json(
+      { error: "Please select a valid city." },
+      { status: 400 }
+    );
+  }
+  const city = rawCity;
+
+  if (fields?.consent !== true) {
+    return NextResponse.json(
+      { error: "Please agree to the data policy to continue." },
+      { status: 400 }
+    );
+  }
+
+  const turnstileOk = await verifyTurnstile(
+    typeof fields?.turnstileToken === "string" ? fields.turnstileToken : undefined,
+    ip
+  );
+  if (!turnstileOk) {
+    return NextResponse.json(
+      { error: "Verification failed. Please try again." },
       { status: 400 }
     );
   }
@@ -67,6 +136,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ couponCode: existing.coupon_code });
     }
 
+    const ipAllowed = await claimIpSlot(ip);
+    if (!ipAllowed) {
+      return NextResponse.json(
+        {
+          error:
+            "This network has already claimed the maximum number of coupons.",
+        },
+        { status: 429 }
+      );
+    }
+
     // Try a few times in case a generated code collides with an existing one,
     // or a concurrent request grabs the same email first.
     const MAX_ATTEMPTS = 5;
@@ -75,7 +155,14 @@ export async function POST(request: Request) {
 
       const { data: inserted, error: insertError } = await supabase
         .from("waitlist")
-        .insert({ email, coupon_code: couponCode })
+        .insert({
+          email,
+          coupon_code: couponCode,
+          name,
+          birth_year: birthYear,
+          city,
+          consented_at: new Date().toISOString(),
+        })
         .select("coupon_code")
         .single();
 
@@ -93,6 +180,7 @@ export async function POST(request: Request) {
           .maybeSingle();
 
         if (raceWinner) {
+          await releaseIpSlot(ip);
           return NextResponse.json({ couponCode: raceWinner.coupon_code });
         }
         // Otherwise it was the coupon code that collided — loop and retry.
@@ -100,12 +188,14 @@ export async function POST(request: Request) {
       }
 
       console.error("waitlist insert error:", insertError);
+      await releaseIpSlot(ip);
       return NextResponse.json(
         { error: "Something went wrong. Please try again." },
         { status: 500 }
       );
     }
 
+    await releaseIpSlot(ip);
     return NextResponse.json(
       { error: "Something went wrong. Please try again." },
       { status: 500 }
